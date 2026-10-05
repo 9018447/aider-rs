@@ -3,10 +3,18 @@
 //! The process speaks newline-delimited JSON-RPC 2.0 on stdin/stdout, per the
 //! MCP stdio transport. One JSON object per line, responses flushed per
 //! message. stdout is protocol-only; all logs go to stderr.
+//!
+//! The process is session-resident by design: one Claude Code session, one
+//! process, one `Session`. Nothing survives the process; durable state lives
+//! in git and on disk only.
 
 use std::io::{self, BufRead, BufReader, Write};
 
 use serde_json::{json, Value};
+
+use crate::core::config::{self, Config};
+use crate::core::session::Session;
+use crate::core::task;
 
 pub const SERVER_NAME: &str = "aider-rs";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -43,11 +51,12 @@ pub fn serve_stdio() -> io::Result<()> {
     Ok(())
 }
 
-/// Stateful MCP server: owns the aider-rs session across one Claude Code
-/// session's lifetime (session-resident by design; nothing survives the
-/// process).
+/// Stateful MCP server: owns the aider-rs session for this Claude Code
+/// session's lifetime.
 pub struct Server {
     initialized: bool,
+    session: Session,
+    config: Config,
 }
 
 impl Default for Server {
@@ -58,7 +67,11 @@ impl Default for Server {
 
 impl Server {
     pub fn new() -> Self {
-        Self { initialized: false }
+        Self {
+            initialized: false,
+            session: Session::new(),
+            config: config::load(),
+        }
     }
 
     /// Handle one incoming JSON-RPC message; return the encoded response
@@ -96,8 +109,6 @@ impl Server {
 
     fn handle_initialize(&mut self, params: &Value) -> Value {
         self.initialized = true;
-        // Echo the client's protocol version when present (most compatible),
-        // defaulting to the version Claude Code ships today.
         let protocol_version = params
             .get("protocolVersion")
             .and_then(Value::as_str)
@@ -111,25 +122,97 @@ impl Server {
 
     fn handle_tool_call(&mut self, params: &Value) -> Result<Value, Value> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let known = matches!(name, tools::TASK | tools::UNDO | tools::STATUS);
-        if !known {
-            return Err(json!({
+        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        match name {
+            tools::TASK => self.tool_task(&arguments),
+            tools::UNDO => self.tool_undo(),
+            tools::STATUS => Ok(text_result(task::status(&self.session, &self.config).to_string(), false)),
+            _ => Err(json!({
                 "code": -32602,
                 "message": format!("unknown tool: {name}"),
-            }));
+            })),
         }
-        // T01 skeleton: the host and tool registry exist; the tool bodies are
-        // implemented by the end-to-end task loop ticket.
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": format!(
-                    "{SERVER_NAME} {SERVER_VERSION}: `{name}` is not implemented yet (host skeleton)."
-                ),
-            }],
-            "isError": true,
-        }))
     }
+
+    fn tool_task(&mut self, arguments: &Value) -> Result<Value, Value> {
+        let task_text = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| json!({
+                "code": -32602,
+                "message": "aider_task requires a `task` string argument",
+            }))?;
+        let files: Vec<String> = arguments
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let reset_context = arguments
+            .get("reset_context")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let args = task::TaskArgs {
+            task: task_text,
+            files,
+            reset_context,
+        };
+        match task::run_task(&mut self.session, &self.config, args) {
+            Ok(outcome) => {
+                let mut text = String::new();
+                if outcome.ok && outcome.commit.is_some() {
+                    text.push_str(&format!(
+                        "aider_task OK — {} file(s) edited, committed as {}.\n",
+                        outcome.files.len(),
+                        outcome.commit.as_deref().map(short_hash).unwrap_or_else(|| "?".to_string())
+                    ));
+                } else {
+                    text.push_str("aider_task OK — no edits applied (conversational reply).\n");
+                }
+                text.push_str(&format!(
+                    "tokens: {} in / {} out\n",
+                    outcome.usage.0, outcome.usage.1
+                ));
+                if !outcome.shells.is_empty() {
+                    text.push_str("\nNOTE: the model asked to run shell commands; NOT executed:\n");
+                    for s in &outcome.shells {
+                        text.push_str(&format!("  $ {}\n", s.trim()));
+                    }
+                }
+                if !outcome.summary.trim().is_empty() {
+                    text.push_str(&format!("\nmodel reply:\n{}\n", outcome.summary.trim()));
+                }
+                if !outcome.diff.trim().is_empty() {
+                    text.push_str(&format!("\ndiff:\n{}\n", outcome.diff.trim_end()));
+                }
+                Ok(text_result(text, false))
+            }
+            Err(err) => Ok(text_result(format!("aider_task FAILED: {err}"), true)),
+        }
+    }
+
+    fn tool_undo(&mut self) -> Result<Value, Value> {
+        match task::undo(&mut self.session) {
+            Ok(msg) => Ok(text_result(msg, false)),
+            Err(err) => Ok(text_result(format!("aider_undo FAILED: {err}"), true)),
+        }
+    }
+}
+
+fn short_hash(h: &str) -> String {
+    h[..7.min(h.len())].to_string()
+}
+
+fn text_result(text: String, is_error: bool) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error,
+    })
 }
 
 fn tool_definitions() -> Value {
@@ -137,7 +220,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": tools::TASK,
-                "description": "Send a natural-language coding task to aider-rs. It runs its own LLM loop, applies edits to files in the current repository, auto-commits each successful edit, and returns the resulting diff, commit hash, and token usage.",
+                "description": "Send a natural-language coding task to aider-rs. It runs its own LLM loop, applies edits to files in the current repository, auto-commits each successful edit round, and returns the resulting diff, commit hash, and token usage.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -160,12 +243,12 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": tools::UNDO,
-                "description": "Undo the last aider-rs edit by moving the worktree back along the auto-commit chain. Call repeatedly to step back further.",
+                "description": "Undo the last aider-rs edit by resetting the worktree back along the auto-commit chain. Call repeatedly to step back further. Only ever rewinds commits aider-rs itself made, and only while HEAD still points at them.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": tools::STATUS,
-                "description": "Report the current aider-rs session state (context, model, tasks run) and the git worktree state (branch, dirty files, recent commits).",
+                "description": "Report the current aider-rs session state (context, model, tasks run, tokens) and the git worktree state (branch, dirty files, recent commits).",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]

@@ -24,3 +24,5 @@ The cloud-drive mount corrupts Cargo artifacts (E0786 on proc-macro .so files). 
 ```bash
 export CARGO_TARGET_DIR=/root/.cache/aider-rs-target
 ```
+
+The mount's mtime granularity also defeats Cargo's incremental change detection: after editing sources, `touch <file>` (or `cargo clean -p aider-rs`) before `cargo test`, or you will re-run a stale binary.
