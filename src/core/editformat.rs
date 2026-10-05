@@ -92,7 +92,7 @@ fn ensure_trailing_newline(s: &str) -> String {
 
 /// aider's `strip_filename`: clean a candidate filename line.
 fn strip_filename(line: &str) -> Option<String> {
-    let mut filename = line.trim();
+    let filename = line.trim();
     if filename == DOTS {
         return None;
     }

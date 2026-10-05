@@ -59,18 +59,6 @@ impl Git {
             .map_err(|e| GitError(format!("failed to run git: {e}")))
     }
 
-    fn check(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-        let out = Self::run(dir, args)?;
-        if !out.status.success() {
-            return Err(GitError(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-
     fn git(&self, args: &[&str]) -> Result<String, GitError> {
         let out = Command::new("git")
             .args(["-C", &self.root.to_string_lossy()])

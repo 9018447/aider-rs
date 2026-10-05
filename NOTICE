@@ -1,0 +1,11 @@
+aider-rs
+Copyright 2026 aider-rs contributors
+
+This product includes software developed as part of aider-rs
+(https://github.com/local/aider-rs), licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+This product is a Rust port of and derives from aider
+(https://github.com/Aider-AI/aider) by Paul Gauthier, licensed under the
+Apache License, Version 2.0. The SEARCH/REPLACE edit-format engine and the
+edit-block system prompt are adapted from aider's source code.

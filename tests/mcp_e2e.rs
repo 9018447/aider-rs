@@ -13,25 +13,19 @@ use serde_json::{json, Value};
 // Mock OpenAI-compatible server
 // ---------------------------------------------------------------------------
 
-struct MockLlm {
-    /// Canned assistant contents, served in order, one per HTTP request.
-    responses: Vec<String>,
-}
-
-impl MockLlm {
-    /// Serve on an ephemeral port; returns the base URL (`http://127.0.0.1:PORT/v1`).
-    fn start(responses: Vec<String>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock llm");
-        let addr = listener.local_addr().expect("local addr");
-        thread::spawn(move || {
-            for body in responses {
-                if let Ok((stream, _)) = listener.accept() {
-                    serve_one_completion(stream, &body);
-                }
+/// Serve canned assistant contents on an ephemeral port, one per HTTP
+/// request, in order; returns the base URL (`http://127.0.0.1:PORT/v1`).
+fn start_mock_llm(responses: Vec<String>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock llm");
+    let addr = listener.local_addr().expect("local addr");
+    thread::spawn(move || {
+        for body in responses {
+            if let Ok((stream, _)) = listener.accept() {
+                serve_one_completion(stream, &body);
             }
-        });
-        format!("http://{addr}/v1")
-    }
+        }
+    });
+    format!("http://{addr}/v1")
 }
 
 fn serve_one_completion(mut stream: TcpStream, assistant_content: &str) {
@@ -213,7 +207,7 @@ fn task_edits_commits_and_undo_restores() {
     let baseline = run_git(&repo, &["rev-parse", "HEAD"]);
 
     let reply = "Renaming alpha to ALPHA.\n\na.txt\n<<<<<<< SEARCH\nalpha\n=======\nALPHA\n>>>>>>> REPLACE\n";
-    let base_url = MockLlm::start(vec![reply.to_string()]);
+    let base_url = start_mock_llm(vec![reply.to_string()]);
 
     let mut s = Session::start_in(&repo, &base_url);
     s.handshake();
@@ -266,7 +260,7 @@ fn failed_match_retries_once_then_reports_without_writing() {
 
     // Both attempts return a block that cannot match.
     let bad = "a.txt\n<<<<<<< SEARCH\ndoes-not-exist\n=======\nX\n>>>>>>> REPLACE\n";
-    let base_url = MockLlm::start(vec![bad.to_string(), bad.to_string()]);
+    let base_url = start_mock_llm(vec![bad.to_string(), bad.to_string()]);
 
     let mut s = Session::start_in(&repo, &base_url);
     s.handshake();
@@ -298,7 +292,7 @@ fn retry_round_can_recover_after_initial_mismatch() {
     // First attempt misses; second attempt (after failure feedback) matches.
     let bad = "a.txt\n<<<<<<< SEARCH\nnope\n=======\nX\n>>>>>>> REPLACE\n";
     let good = "a.txt\n<<<<<<< SEARCH\nalpha\n=======\nALPHA\n>>>>>>> REPLACE\n";
-    let base_url = MockLlm::start(vec![bad.to_string(), good.to_string()]);
+    let base_url = start_mock_llm(vec![bad.to_string(), good.to_string()]);
 
     let mut s = Session::start_in(&repo, &base_url);
     s.handshake();
@@ -315,7 +309,7 @@ fn retry_round_can_recover_after_initial_mismatch() {
 fn new_file_creation_via_empty_search_block() {
     let repo = temp_repo("newfile");
     let reply = "Creating a new module.\n\nsrc/hello.py\n<<<<<<< SEARCH\n=======\ndef hello():\n    print(\"hello\")\n>>>>>>> REPLACE\n";
-    let base_url = MockLlm::start(vec![reply.to_string()]);
+    let base_url = start_mock_llm(vec![reply.to_string()]);
 
     let mut s = Session::start_in(&repo, &base_url);
     s.handshake();
@@ -342,7 +336,7 @@ fn shell_commands_are_reported_not_executed() {
     run_git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base", "--"]);
 
     let reply = "Running a command and editing.\n\n```bash\nrm -rf /\n```\n\na.txt\n<<<<<<< SEARCH\nalpha\n=======\nALPHA\n>>>>>>> REPLACE\n";
-    let base_url = MockLlm::start(vec![reply.to_string()]);
+    let base_url = start_mock_llm(vec![reply.to_string()]);
 
     let mut s = Session::start_in(&repo, &base_url);
     s.handshake();
@@ -362,7 +356,7 @@ fn task_outside_git_repo_fails_with_clear_error() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let base_url = MockLlm::start(vec!["hi".to_string()]);
+    let base_url = start_mock_llm(vec!["hi".to_string()]);
     let mut s = Session::start_in(&dir, &base_url);
     s.handshake();
 
