@@ -28,9 +28,7 @@ Claude Code  --(MCP stdio: aider_task / aider_undo / aider_status)-->  aider-rs
 ## Install
 
 ```bash
-cargo build --release
-mkdir -p plugin/bin
-cp target/release/aider-rs plugin/bin/
+./plugin/install.sh   # builds (local-disk target) and stages plugin/bin/aider-rs
 ```
 
 Then add the plugin to Claude Code — either via a plugin marketplace that
@@ -64,6 +62,7 @@ Configuration resolves in this order (highest first):
 | api_key | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider key |
 | base_url | `OPENAI_API_BASE` / `ANTHROPIC_BASE_URL` | custom endpoint (OpenRouter, DeepSeek, Ollama, vLLM…) |
 | timeout_secs | `AIDER_RS_TIMEOUT_SECS` | per-request LLM timeout (default 120) |
+| task_timeout_secs | `AIDER_RS_TASK_TIMEOUT_SECS` | wall-clock budget per aider_task, including retry rounds (default 600); on timeout nothing is written |
 | max_edit_retries | `AIDER_RS_MAX_EDIT_RETRIES` | retry rounds when SEARCH blocks fail to match (default 1) |
 
 JSON keys in the config files are the left column, e.g.
@@ -77,15 +76,34 @@ JSON keys in the config files are the left column, e.g.
   and `reset_context` (fresh conversation).
 - **`aider_undo`** — rewind the last aider-rs edit round. Only ever resets
   commits aider-rs itself made, and only while HEAD still points at them.
+  Uses `git reset --keep`, so uncommitted changes to files the commit did
+  not touch survive the rewind; conflicting dirty state aborts the undo
+  with a clear error instead of destroying work.
 - **`aider_status`** — session state (model, tasks, tokens) and git state
   (branch, dirty counts, recent commits).
 
 ## Differences from aider (by design)
 
 - No repo map: context comes from explicit file lists, not tree-sitter outlines.
-- Edit formats: `diff` (SEARCH/REPLACE) and `whole`-style new-file blocks only.
+- Edit formats: `diff` (SEARCH/REPLACE) primary; `whole` (filename + fenced
+  full content) as a fallback when no SEARCH/REPLACE blocks are present.
+- Failed SEARCH matches are fed back to the model for one retry round
+  (`AIDER_RS_MAX_EDIT_RETRIES`, default 1) before the task fails.
 - Shell commands the model proposes are reported back to Claude Code, never executed.
 - No chat-mode commands (`/add`, `/drop`, …); Claude Code orchestrates instead.
+
+## Performance
+
+Acceptance targets (ticket 06): binary < 15MB, cold start < 200ms,
+resident memory < 50MB. Reproduce with:
+
+```bash
+./plugin/install.sh
+python3 scripts/bench.py
+```
+
+Recorded on the dev machine (rustc 1.99.0, x86_64 Linux, 2026-10-06):
+binary 1.8MB, cold start ~131ms, RSS ~2.4MB, warm dispatch ~0.2ms.
 
 ## Development
 

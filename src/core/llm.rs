@@ -89,7 +89,7 @@ pub fn client_from_config(config: &Config) -> Result<Box<dyn LlmClient>, LlmErro
     })
 }
 
-pub trait LlmClient {
+pub trait LlmClient: Send {
     fn complete(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
     fn model(&self) -> &str;
 }

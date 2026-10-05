@@ -5,7 +5,7 @@
 //! loop, edits files, and auto-commits to git. All diagnostics go to stderr:
 //! stdout is the JSON-RPC protocol channel and must stay clean.
 
-use aiders::mcp;
+use aider_rs::mcp;
 
 fn main() {
     if let Err(err) = mcp::serve_stdio() {

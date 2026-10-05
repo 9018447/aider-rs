@@ -31,6 +31,16 @@ pub struct Edit {
     pub path: String,
     pub search: String,
     pub replace: String,
+    /// `Whole` means `replace` is the entire new file content (aider's
+    /// `whole` format fallback); `SearchReplace` applies the classic
+    /// search-match semantics (empty search = create/append).
+    pub kind: EditKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditKind {
+    SearchReplace,
+    Whole,
 }
 
 /// Shell command the LLM asked to run (parsed but NOT executed by aider-rs;
@@ -40,7 +50,7 @@ pub struct ShellCommand(pub String);
 
 /// Marker-line classifiers, replacing aider's regexes
 /// (`^<{5,9} SEARCH>?\s*$`, `^={5,9}\s*$`, `^>{5,9} REPLACE\s*$`).
-fn is_head(line: &str) -> bool {
+fn is_search_marker(line: &str) -> bool {
     let s = line.trim_end();
     let n = s.chars().take_while(|&c| c == '<').count();
     if !(5..=9).contains(&n) {
@@ -50,13 +60,13 @@ fn is_head(line: &str) -> bool {
     rest == " SEARCH" || rest == " SEARCH>"
 }
 
-fn is_divider(line: &str) -> bool {
+fn is_divider_marker(line: &str) -> bool {
     let s = line.trim_end();
     let n = s.chars().take_while(|&c| c == '=').count();
     (5..=9).contains(&n) && s[n..].trim().is_empty()
 }
 
-fn is_updated(line: &str) -> bool {
+fn is_replace_marker(line: &str) -> bool {
     let s = line.trim_end();
     let n = s.chars().take_while(|&c| c == '>').count();
     if !(5..=9).contains(&n) {
@@ -124,7 +134,7 @@ fn find_filename(preceding: &[String], valid: &[String]) -> Option<String> {
     let mut filenames = Vec::new();
     for line in preceding.iter().rev().take(3) {
         let t = line.trim();
-        if is_head(t) || is_divider(t) || is_updated(t) {
+        if is_search_marker(t) || is_divider_marker(t) || is_replace_marker(t) {
             // Block structure (a previous block's markers): stop looking;
             // these are never filenames.
             break;
@@ -189,8 +199,8 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
     while i < lines.len() {
         let line = &lines[i];
 
-        let next_is_editblock = (i + 1 < lines.len() && is_head(lines[i + 1].trim()))
-            || (i + 2 < lines.len() && is_head(lines[i + 2].trim()));
+        let next_is_editblock = (i + 1 < lines.len() && is_search_marker(lines[i + 1].trim()))
+            || (i + 2 < lines.len() && is_search_marker(lines[i + 2].trim()));
 
         if shell_starts.iter().any(|s| line.trim().starts_with(s)) && !next_is_editblock {
             let mut shell_content = String::new();
@@ -208,10 +218,10 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
             continue;
         }
 
-        if is_head(line.trim()) {
+        if is_search_marker(line.trim()) {
             // New-file blocks (HEAD directly followed by DIVIDER) may use a
             // filename that isn't a chat file yet.
-            let new_file_block = i + 1 < lines.len() && is_divider(lines[i + 1].trim());
+            let new_file_block = i + 1 < lines.len() && is_divider_marker(lines[i + 1].trim());
             let start = i.saturating_sub(3);
             let preceding = &lines[start..i];
             let mut filename = if new_file_block {
@@ -231,7 +241,7 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
 
             let mut search = String::new();
             i += 1;
-            while i < lines.len() && !is_divider(lines[i].trim()) {
+            while i < lines.len() && !is_divider_marker(lines[i].trim()) {
                 search.push_str(&lines[i]);
                 i += 1;
             }
@@ -241,7 +251,7 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
             i += 1; // past divider
 
             let mut replace = String::new();
-            while i < lines.len() && !is_updated(lines[i].trim()) && !is_divider(lines[i].trim()) {
+            while i < lines.len() && !is_replace_marker(lines[i].trim()) && !is_divider_marker(lines[i].trim()) {
                 replace.push_str(&lines[i]);
                 i += 1;
             }
@@ -254,6 +264,7 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
                 path: filename.take().unwrap_or_default(),
                 search,
                 replace,
+                kind: EditKind::SearchReplace,
             });
             continue;
         }
@@ -261,7 +272,56 @@ pub fn parse_edits(content: &str, chat_files: &[String]) -> (Vec<Edit>, Vec<Shel
         i += 1;
     }
 
+    // Whole-file fallback (aider's `whole` format): if the model produced no
+    // SEARCH/REPLACE blocks at all, treat fenced blocks preceded by a
+    // filename line as the complete new content of that file (create or
+    // wholesale-replace). Only engaged when zero edit blocks were parsed, so
+    // diff-format replies never mix with whole-file blocks.
+    if edits.is_empty() {
+        let whole = parse_whole_blocks(&lines);
+        if !whole.is_empty() {
+            return (whole, shells);
+        }
+    }
+
     (edits, shells)
+}
+
+/// Parse aider `whole`-style blocks: a filename line followed by a fenced
+/// block whose content is the entire file. Used only as a fallback when the
+/// model emitted no SEARCH/REPLACE blocks.
+fn parse_whole_blocks(lines: &[String]) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if lines[i].trim().starts_with(FENCE) {
+            // Fence opening: look back for a filename line (through fence
+            // lines only, up to 3 back, mirroring the diff-format rules).
+            let start = i.saturating_sub(3);
+            let preceding = &lines[start..i];
+            let filename = find_filename(preceding, &[]);
+            if let Some(path) = filename {
+                let mut content = String::new();
+                let mut j = i + 1;
+                while j < lines.len() && !lines[j].trim().starts_with(FENCE) {
+                    content.push_str(&lines[j]);
+                    j += 1;
+                }
+                if j < lines.len() && !content.trim().is_empty() {
+                    edits.push(Edit {
+                        path,
+                        search: String::new(),
+                        replace: content,
+                        kind: EditKind::Whole,
+                    });
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    edits
 }
 
 /// aider's `strip_quoted_wrapping`: drop a filename line and/or code fences
@@ -521,7 +581,13 @@ pub fn apply_edits(edits: &[Edit]) -> Result<HashMap<String, String>, Vec<Edit>>
             Some(s) => Some(s.as_str()),
             None => contents.get(&e.path).and_then(|c| c.as_deref()),
         };
-        match do_replace(&e.path, current_ref, &e.search, &e.replace) {
+        let new_content = match e.kind {
+            EditKind::Whole => Some(e.replace.clone()),
+            EditKind::SearchReplace => {
+                do_replace(&e.path, current_ref, &e.search, &e.replace)
+            }
+        };
+        match new_content {
             Some(new_content) => {
                 staged.insert(e.path.clone(), new_content);
             }
@@ -561,6 +627,16 @@ mod tests {
             path: path.to_string(),
             search: search.to_string(),
             replace: replace.to_string(),
+            kind: EditKind::SearchReplace,
+        }
+    }
+
+    fn whole(path: &str, content: &str) -> Edit {
+        Edit {
+            path: path.to_string(),
+            search: String::new(),
+            replace: content.to_string(),
+            kind: EditKind::Whole,
         }
     }
 
@@ -758,5 +834,161 @@ mod tests {
         assert_eq!(s, "inner\n");
         let s = strip_quoted_wrapping("inner\n", None);
         assert_eq!(s, "inner\n");
+    }
+
+    // ----- whole-format fallback (aider `whole`) -----
+
+    #[test]
+    fn whole_fallback_parses_filename_then_fence() {
+        let edits = parse(
+            "Here is the new file.\n\nsrc/main.rs\n```rust\nfn main() {}\n```\n",
+            &[],
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].path, "src/main.rs");
+        assert_eq!(edits[0].kind, EditKind::Whole);
+        assert_eq!(edits[0].replace, "fn main() {}\n");
+    }
+
+    #[test]
+    fn whole_fallback_replaces_existing_file_content() {
+        let dir = std::env::temp_dir().join(format!("aiders-whole-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("a.txt");
+        std::fs::write(&f, "old content\n").unwrap();
+        let e = whole(f.to_str().unwrap(), "entirely new\n");
+        let staged = apply_edits(&[e]).unwrap();
+        assert_eq!(staged[f.to_str().unwrap()], "entirely new\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whole_fallback_not_engaged_when_search_replace_blocks_exist() {
+        // A diff-format reply keeps diff semantics even if it also contains
+        // fenced code after a filename-looking line.
+        let edits = parse(
+            "a.txt\n<<<<<<< SEARCH\nalpha\n=======\nALPHA\n>>>>>>> REPLACE\n\nb.txt\n```\nstuff\n```\n",
+            &["a.txt"],
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].kind, EditKind::SearchReplace);
+    }
+
+    #[test]
+    fn conversational_fence_without_filename_is_not_an_edit() {
+        let edits = parse(
+            "You could write it like this:\n\n```python\nprint('hi')\n```\n\nLet me know!\n",
+            &[],
+        );
+        assert!(edits.is_empty(), "no filename line -> no edit: {edits:?}");
+    }
+
+    // ----- regression samples ported from aider's tests/basic/test_editblock.py -----
+
+    #[test]
+    fn aider_sample_replace_part_with_missing_leading_whitespace() {
+        let whole_text = "    line1\n    line2\n    line3\n";
+        let part = "line1\nline2\n";
+        let replace = "new_line1\nnew_line2\n";
+        let expected = "    new_line1\n    new_line2\n    line3\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_replace_part_with_varied_leading_whitespace() {
+        let whole_text = "\n    line1\n    line2\n        line3\n    line4\n";
+        let part = "line2\n    line3\n";
+        let replace = "new_line2\n    new_line3\n";
+        let expected = "\n    line1\n    new_line2\n        new_line3\n    line4\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_replace_multiple_matches_only_first() {
+        let whole_text = "line1\nline2\nline1\nline3\n";
+        let part = "line1\n";
+        let replace = "new_line\n";
+        let expected = "new_line\nline2\nline1\nline3\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_replace_multiple_matches_missing_whitespace() {
+        let whole_text = "    line1\n    line2\n    line1\n    line3\n";
+        let part = "line1\n";
+        let replace = "new_line\n";
+        let expected = "    new_line\n    line2\n    line1\n    line3\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_some_missing_leading_whitespace() {
+        let whole_text = "    line1\n    line2\n    line3\n";
+        let part = " line1\n line2\n";
+        let replace = " new_line1\n     new_line2\n";
+        let expected = "    new_line1\n        new_line2\n    line3\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_missing_whitespace_with_blank_line_issue_25() {
+        // Regression for https://github.com/Aider-AI/aider/issues/25: a blank
+        // line inside the part must not break the leading-whitespace logic.
+        let whole_text = "    line1\n    line2\n    line3\n";
+        let part = "\n  line1\n  line2\n";
+        let replace = "  new_line1\n  new_line2\n";
+        let expected = "    new_line1\n    new_line2\n    line3\n";
+        assert_eq!(
+            replace_most_similar_chunk(whole_text, part, replace),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn aider_sample_find_original_update_blocks_basic() {
+        let edit = "\nHere's the change:\n\n```text\nfoo.txt\n<<<<<<< SEARCH\nTwo\n=======\nTooooo\n>>>>>>> REPLACE\n```\n\nHope you like it!\n";
+        let edits = parse(edit, &[]);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].path, "foo.txt");
+        assert_eq!(edits[0].search, "Two\n");
+        assert_eq!(edits[0].replace, "Tooooo\n");
+    }
+
+    #[test]
+    fn aider_sample_quote_below_filename() {
+        let edit = "\nHere's the change:\n\nfoo.txt\n```text\n<<<<<<< SEARCH\nTwo\n=======\nTooooo\n>>>>>>> REPLACE\n```\n\nHope you like it!\n";
+        let edits = parse(edit, &[]);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].path, "foo.txt");
+        assert_eq!(edits[0].search, "Two\n");
+        assert_eq!(edits[0].replace, "Tooooo\n");
+    }
+
+    #[test]
+    fn aider_sample_no_final_newline_multi_block() {
+        // Three consecutive blocks in one reply, the last without a trailing
+        // newline — none of them should be dropped or mis-parsed.
+        let edit = "\naider/coder.py\n<<<<<<< SEARCH\n            self.console.print(\"[red]^C again to quit\")\n=======\n            self.io.tool_error(\"^C again to quit\")\n>>>>>>> REPLACE\n\naider/coder.py\n<<<<<<< SEARCH\n            self.io.tool_error(\"Malformed ORIGINAL/UPDATE blocks, retrying...\")\n            self.io.tool_error(err)\n=======\n            self.io.tool_error(\"Malformed ORIGINAL/UPDATE blocks, retrying...\")\n            self.io.tool_error(str(err))\n>>>>>>> REPLACE\n\naider/coder.py\n<<<<<<< SEARCH\n            self.console.print(\"[red]Skipped commit.\")\n=======\n            self.io.tool_error(\"Skipped commit.\")\n>>>>>>> REPLACE";
+        let edits = parse(edit, &[]);
+        assert_eq!(edits.len(), 3);
+        assert!(edits.iter().all(|e| e.path == "aider/coder.py"));
+        // The final block had no trailing newline; the parser normalizes it
+        // (aider's ensure_trailing_newline behavior).
+        assert_eq!(edits[2].replace, "            self.io.tool_error(\"Skipped commit.\")\n");
     }
 }

@@ -13,6 +13,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use serde_json::{json, Value};
 
 use crate::core::config::{self, Config};
+use crate::core::git::short_hash;
 use crate::core::session::Session;
 use crate::core::task;
 
@@ -176,7 +177,7 @@ impl Server {
                 }
                 text.push_str(&format!(
                     "tokens: {} in / {} out\n",
-                    outcome.usage.0, outcome.usage.1
+                    outcome.usage.input_tokens, outcome.usage.output_tokens
                 ));
                 if !outcome.shells.is_empty() {
                     text.push_str("\nNOTE: the model asked to run shell commands; NOT executed:\n");
@@ -202,10 +203,6 @@ impl Server {
             Err(err) => Ok(text_result(format!("aider_undo FAILED: {err}"), true)),
         }
     }
-}
-
-fn short_hash(h: &str) -> String {
-    h[..7.min(h.len())].to_string()
 }
 
 fn text_result(text: String, is_error: bool) -> Value {

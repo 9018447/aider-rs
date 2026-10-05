@@ -152,9 +152,11 @@ impl Git {
         self.git(&["diff", from, to, "--"])
     }
 
-    /// Rewind the last commit with `git reset --hard HEAD~1` after verifying
+    /// Rewind the last commit with `git reset --keep HEAD~1` after verifying
     /// `expected_head` is the current HEAD (caller checks it's an aider-rs
-    /// commit). Returns the new HEAD hash.
+    /// commit). `--keep` (not `--hard`) so uncommitted changes to files the
+    /// commit did not touch survive; git refuses if the commit and the dirty
+    /// state overlap, which surfaces as an error. Returns the new HEAD hash.
     pub fn reset_last_commit(&self, expected_head: &str) -> Result<String, GitError> {
         let head = self.head_hash()?;
         if head != expected_head {
@@ -162,9 +164,14 @@ impl Git {
                 "HEAD has moved since that commit ({head} != {expected_head}); refusing to undo"
             )));
         }
-        self.git(&["reset", "--hard", "HEAD~1"])?;
+        self.git(&["reset", "--keep", "HEAD~1"])?;
         self.head_hash()
     }
+}
+
+/// Shorten a commit hash for display (aider-style 7 chars).
+pub fn short_hash(h: &str) -> String {
+    h[..7.min(h.len())].to_string()
 }
 
 #[cfg(test)]

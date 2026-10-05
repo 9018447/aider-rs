@@ -6,8 +6,8 @@ use serde_json::json;
 
 use crate::core::config::Config;
 use crate::core::editformat::{self, Edit};
-use crate::core::git::Git;
-use crate::core::llm::{self, ChatRequest};
+use crate::core::git::{short_hash, Git};
+use crate::core::llm::{self, ChatRequest, Usage};
 use crate::core::prompts;
 use crate::core::session::Session;
 
@@ -19,7 +19,7 @@ pub struct TaskOutcome {
     pub commit: Option<String>,
     pub diff: String,
     pub summary: String,
-    pub usage: (u64, u64),
+    pub usage: Usage,
     pub shells: Vec<String>,
 }
 
@@ -29,6 +29,10 @@ pub enum TaskError {
     Llm(llm::LlmError),
     AllEditsFailed(String),
     Git(String),
+    Io(String),
+    /// The task exceeded the wall-clock budget and was aborted before any
+    /// writes happened (edits only apply after a fully successful round).
+    Timeout { elapsed_secs: u64, attempts: u32 },
 }
 
 impl std::fmt::Display for TaskError {
@@ -38,6 +42,8 @@ impl std::fmt::Display for TaskError {
             TaskError::Llm(e) => write!(f, "{e}"),
             TaskError::AllEditsFailed(d) => write!(f, "edits failed to apply; nothing was written:\n{d}"),
             TaskError::Git(g) => write!(f, "git error: {g}"),
+            TaskError::Io(e) => write!(f, "io error: {e}"),
+            TaskError::Timeout { elapsed_secs, attempts } => write!(f, "task timed out after {elapsed_secs}s ({attempts} attempt(s) completed); nothing was written"),
         }
     }
 }
@@ -55,7 +61,7 @@ pub fn run_task(
     config: &Config,
     args: TaskArgs,
 ) -> Result<TaskOutcome, TaskError> {
-    let cwd = std::env::current_dir().map_err(|e| TaskError::Git(e.to_string()))?;
+    let cwd = std::env::current_dir().map_err(|e| TaskError::Io(e.to_string()))?;
     if !Git::is_repo(&cwd) {
         return Err(TaskError::NotInGitRepo);
     }
@@ -85,66 +91,178 @@ pub fn run_task(
     let user_msg = prompts::task_user_message(&args.task, &context_files);
     session.push_user(&user_msg);
 
-    // First attempt, plus one retry round when blocks fail to match.
+    // Task-level wall-clock budget. Each LLM request additionally has its own
+    // HTTP timeout; this bounds the whole loop (initial attempt + retries).
+    let task_timeout = std::time::Duration::from_secs(config.task_timeout_secs.unwrap_or(600));
+
+    // First attempt, plus retry rounds when blocks fail to match. The LLM
+    // loop runs on a worker thread so the parent can enforce the wall-clock
+    // budget; the worker never touches files — edits only apply in the parent
+    // after a fully successful round, so a timeout leaves nothing written.
     let max_attempts = config.max_edit_retries.unwrap_or(1) + 1;
-    let mut last_usage = (0u64, 0u64);
-    let mut shells: Vec<String> = Vec::new();
-    let mut edits: Vec<Edit> = Vec::new();
-    let mut assistant_reply = String::new();
+    let history_in = session.history.clone();
+    let context_names: Vec<String> = context_files.iter().map(|(p, _)| p.clone()).collect();
+    let (tx, rx) = std::sync::mpsc::channel::<LoopResult>();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let result = run_llm_loop(client.as_ref(), &history_in, &context_names, max_attempts);
+        let _ = tx.send(result);
+    });
 
-    for attempt in 0..max_attempts {
-        let req = ChatRequest {
-            system: prompts::SYSTEM_PROMPT.to_string(),
-            messages: session.history.clone(),
-        };
-        let resp = client.complete(&req).map_err(TaskError::Llm)?;
-        last_usage = (resp.usage.input_tokens, resp.usage.output_tokens);
-        session.total_input_tokens += resp.usage.input_tokens;
-        session.total_output_tokens += resp.usage.output_tokens;
-        assistant_reply = resp.content;
-
-        let chat_files: Vec<String> = context_files.iter().map(|(p, _)| p.clone()).collect();
-        let (parsed, parsed_shells) = editformat::parse_edits(&assistant_reply, &chat_files);
-        shells = parsed_shells.iter().map(|s| s.0.clone()).collect();
-
-        // Dry-run apply against current file contents.
-        match editformat::apply_edits(&parsed) {
-            Ok(_) => {
-                edits = parsed;
-                break;
-            }
-            Err(failed) => {
-                if attempt + 1 >= max_attempts {
-                    session.tasks_run += 1;
-                    session.tasks_failed += 1;
-                    session.push_assistant(&assistant_reply);
-                    return Err(TaskError::AllEditsFailed(
-                        editformat::format_failed_blocks(&failed),
-                    ));
-                }
-                // Feed the failure back to the LLM for one retry round.
-                session.push_assistant(&assistant_reply);
-                session.push_user(&editformat::format_failed_blocks(&failed));
-            }
+    let loop_result = match rx.recv_timeout(task_timeout) {
+        Ok(result) => result,
+        Err(_) => {
+            session.tasks_run += 1;
+            session.tasks_failed += 1;
+            return Err(TaskError::Timeout {
+                elapsed_secs: started.elapsed().as_secs(),
+                attempts: 0,
+            });
         }
-    }
+    };
+
+    let done = match loop_result {
+        LoopResult::Done(done) => done,
+        LoopResult::RetryExhausted {
+            history,
+            assistant_reply,
+            usage,
+            detail,
+        } => {
+            session.history = history;
+            session.total_input_tokens += usage.input_tokens;
+            session.total_output_tokens += usage.output_tokens;
+            session.tasks_run += 1;
+            session.tasks_failed += 1;
+            session.push_assistant(&assistant_reply);
+            return Err(TaskError::AllEditsFailed(detail));
+        }
+        LoopResult::Failed(e) => return Err(e),
+    };
+
+    let LoopDone {
+        history,
+        edits,
+        assistant_reply,
+        usage,
+        shells,
+    } = done;
+    session.history = history;
+    session.total_input_tokens += usage.input_tokens;
+    session.total_output_tokens += usage.output_tokens;
 
     if edits.is_empty() {
         session.tasks_run += 1;
         session.push_assistant(&assistant_reply);
         // No edits: treat as a conversational reply (question or refusal).
-        let summary = first_meaningful_lines(&assistant_reply, 20);
         return Ok(TaskOutcome {
             ok: true,
             files: vec![],
             commit: None,
             diff: String::new(),
-            summary,
-            usage: last_usage,
+            summary: first_meaningful_lines(&assistant_reply, 20),
+            usage,
             shells,
         });
     }
 
+    finish_task(session, &git, &args.task, edits, assistant_reply, usage, shells)
+}
+
+/// The worker thread's product for one aider_task.
+struct LoopDone {
+    history: Vec<crate::core::llm::ChatMessage>,
+    edits: Vec<Edit>,
+    assistant_reply: String,
+    usage: Usage,
+    shells: Vec<String>,
+}
+
+enum LoopResult {
+    Done(LoopDone),
+    /// Every retry round failed to match; nothing was written.
+    RetryExhausted {
+        history: Vec<crate::core::llm::ChatMessage>,
+        assistant_reply: String,
+        usage: Usage,
+        detail: String,
+    },
+    Failed(TaskError),
+}
+
+/// LLM loop with retry rounds. Runs on the worker thread; performs no file
+/// writes (apply_edits is a dry run against current contents) so a timeout
+/// or failure never leaves partial state behind.
+fn run_llm_loop(
+    client: &dyn llm::LlmClient,
+    history: &[crate::core::llm::ChatMessage],
+    context_names: &[String],
+    max_attempts: u32,
+) -> LoopResult {
+    let mut history = history.to_vec();
+    let mut usage;
+    let mut last_reply;
+
+    for attempt in 0..max_attempts {
+        let req = ChatRequest {
+            system: prompts::SYSTEM_PROMPT.to_string(),
+            messages: history.clone(),
+        };
+        let resp = match client.complete(&req) {
+            Ok(resp) => resp,
+            Err(e) => return LoopResult::Failed(TaskError::Llm(e)),
+        };
+        usage = resp.usage;
+        last_reply = resp.content;
+
+        let (parsed, parsed_shells) = editformat::parse_edits(&last_reply, context_names);
+        let shells: Vec<String> = parsed_shells.iter().map(|s| s.0.clone()).collect();
+
+        match editformat::apply_edits(&parsed) {
+            Ok(_) => {
+                return LoopResult::Done(LoopDone {
+                    history,
+                    edits: parsed,
+                    assistant_reply: last_reply,
+                    usage,
+                    shells,
+                });
+            }
+            Err(failed) => {
+                let detail = editformat::format_failed_blocks(&failed);
+                if attempt + 1 >= max_attempts {
+                    return LoopResult::RetryExhausted {
+                        history,
+                        assistant_reply: last_reply,
+                        usage,
+                        detail,
+                    };
+                }
+                // Feed the failure back to the LLM for one retry round.
+                history.push(crate::core::llm::ChatMessage {
+                    role: "assistant".into(),
+                    content: last_reply.clone(),
+                });
+                history.push(crate::core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: detail,
+                });
+            }
+        }
+    }
+    unreachable!("the loop always returns from within one iteration")
+}
+
+/// Write the validated edits, auto-commit, and build the outcome.
+fn finish_task(
+    session: &mut Session,
+    git: &Git,
+    task_text: &str,
+    edits: Vec<Edit>,
+    assistant_reply: String,
+    usage: Usage,
+    shells: Vec<String>,
+) -> Result<TaskOutcome, TaskError> {
     // Apply for real (guaranteed to succeed: same inputs just succeeded dry).
     let staged = editformat::apply_edits(&edits).expect("dry run already validated these edits");
     let mut written: Vec<String> = Vec::new();
@@ -153,13 +271,13 @@ pub fn run_task(
         if let Some(parent) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(path, content).map_err(|e| TaskError::Git(e.to_string()))?;
+        std::fs::write(path, content).map_err(|e| TaskError::Io(e.to_string()))?;
         written.push(path.clone());
     }
 
     // Auto-commit: one commit per task round, aider-style message prefix.
     let prev_head = git.head_hash().map_err(|e| TaskError::Git(e.to_string()))?;
-    let commit_msg = commit_message(&args.task, &written);
+    let commit_msg = commit_message(task_text, &written);
     let path_refs: Vec<&str> = written.iter().map(|s| s.as_str()).collect();
     let new_head = git
         .commit_paths(&path_refs, &commit_msg)
@@ -167,18 +285,15 @@ pub fn run_task(
     session.commits.push(new_head.clone());
     session.tasks_run += 1;
 
-    let diff = git
-        .diff_refs(&prev_head, &new_head)
-        .unwrap_or_default();
+    let diff = git.diff_refs(&prev_head, &new_head).unwrap_or_default();
 
     session.push_assistant(&format!(
         "Applied {} edit(s) to {} file(s), committed as {}.\n\n{}",
         edits.len(),
         written.len(),
-        &new_head[..7.min(new_head.len())],
+        short_hash(&new_head),
         assistant_reply
     ));
-
 
     Ok(TaskOutcome {
         ok: true,
@@ -186,7 +301,7 @@ pub fn run_task(
         commit: Some(new_head),
         diff,
         summary: first_meaningful_lines(&assistant_reply, 20),
-        usage: last_usage,
+        usage,
         shells,
     })
 }
@@ -204,8 +319,8 @@ pub fn undo(session: &mut Session) -> Result<String, String> {
     session.commits.pop();
     Ok(format!(
         "Undone commit {} (aider-rs edit round rewound); HEAD is now {}.",
-        &last[..7.min(last.len())],
-        &undone[..7.min(undone.len())]
+        short_hash(&last),
+        short_hash(&undone)
     ))
 }
 

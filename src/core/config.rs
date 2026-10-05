@@ -31,6 +31,7 @@ pub struct Config {
     pub base_url: Option<String>,
     pub timeout_secs: Option<u64>,
     pub max_edit_retries: Option<u32>,
+    pub task_timeout_secs: Option<u64>,
 }
 
 /// File-backed portion of the config (JSON, snake_case).
@@ -42,6 +43,7 @@ struct FileConfig {
     base_url: Option<String>,
     timeout_secs: Option<u64>,
     max_edit_retries: Option<u32>,
+    task_timeout_secs: Option<u64>,
 }
 
 impl FileConfig {
@@ -64,6 +66,7 @@ impl FileConfig {
             base_url,
             timeout_secs,
             max_edit_retries,
+            task_timeout_secs,
         } = self;
         if cfg.provider.is_none() {
             cfg.provider = provider.as_deref().and_then(parse_provider);
@@ -82,6 +85,9 @@ impl FileConfig {
         }
         if cfg.max_edit_retries.is_none() {
             cfg.max_edit_retries = max_edit_retries;
+        }
+        if cfg.task_timeout_secs.is_none() {
+            cfg.task_timeout_secs = task_timeout_secs;
         }
     }
 }
@@ -193,6 +199,11 @@ fn apply_env(cfg: &mut Config, get: &impl Fn(&str) -> Option<String>) {
     if cfg.max_edit_retries.is_none() {
         if let Some(r) = get("AIDER_RS_MAX_EDIT_RETRIES").and_then(|v| v.parse().ok()) {
             cfg.max_edit_retries = Some(r);
+        }
+    }
+    if cfg.task_timeout_secs.is_none() {
+        if let Some(t) = get("AIDER_RS_TASK_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
+            cfg.task_timeout_secs = Some(t);
         }
     }
 }

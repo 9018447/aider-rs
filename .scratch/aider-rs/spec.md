@@ -60,3 +60,14 @@ aider-rs：用 Rust 编写的轻量 AI 结对编程 agent，打包为 Claude Cod
 - 已确认的量化验收指标：单二进制 <15MB、冷启动 <200ms、常驻内存 <50MB（不含模型上下文文本）。
 - 参考实现：`/Coze/Drive/编程专家/aider`（shallow clone，Apache 2.0）。
 - 完整共识与里程碑：`/Coze/Drive/编程专家/aider-rs-plan.md`。
+
+## Amendments (implementation, 2026-10-06)
+
+实现期间经 code-review 双轴审查（Standards + Spec）后的记录修正与澄清：
+
+1. **匹配失败重试**（修订 L26「匹配不到即失败并回滚」）：失败先反馈模型重试一轮（`AIDER_RS_MAX_EDIT_RETRIES`，默认 1）再失败；失败时仍保证零写入。此为 aider 原生语义（错误反射回模型），保留。
+2. **whole 兜底语义澄清**：diff（SEARCH/REPLACE）为主格式；当且仅当回复中没有任何 SEARCH/REPLACE 块时，把「文件名行 + 围栏完整内容」解析为 whole 编辑（新建或整文件替换）。
+3. **undo 用 `git reset --keep`**（强化 T04 安全语义）：回退 aider-rs 自己的提交时不破坏工作区中与该提交无关的未提交改动；冲突时明确报错拒绝，而非静默覆盖。
+4. **任务级超时**：`AIDER_RS_TASK_TIMEOUT_SECS`（默认 600s）约束整个 aider_task（含重试轮），超时中止且零写入。
+5. **shell 命令上报**（新增，spec 未要求）：模型请求执行的 shell 命令一律不执行，原文上报给 Claude Code 决策——安全默认。
+6. **性能测量可复现**：`scripts/bench.py` + README「Performance」记录（1.8MB / ~131ms / ~2.4MB，rustc 1.99.0）。

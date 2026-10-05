@@ -6,7 +6,7 @@ description = "An extremely lightweight Rust port of aider, running as a Claude 
 license = "Apache-2.0"
 
 [lib]
-name = "aiders"
+name = "aider_rs"
 path = "src/lib.rs"
 
 [[bin]]
