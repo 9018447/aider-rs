@@ -1,0 +1,28 @@
+[package]
+name = "aider-rs"
+version = "0.1.0"
+edition = "2021"
+description = "An extremely lightweight Rust port of aider, running as a Claude Code plugin MCP host. Claude Code orchestrates; aider-rs does the coding with its own LLM and auto-commits to git."
+license = "Apache-2.0"
+
+[lib]
+name = "aiders"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aider-rs"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# LLM transport (added for the end-to-end task loop, T02+)
+ureq = { version = "2", features = ["json", "tls"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

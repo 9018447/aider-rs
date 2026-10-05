@@ -1,0 +1,7 @@
+{
+  "aider-rs": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/bin/aider-rs",
+    "args": [],
+    "env": {}
+  }
+}

@@ -17,3 +17,10 @@ Issues、specs 与 tickets 以 markdown 文件形式落在 `.scratch/` 之下（
 ### Domain docs
 
 单上下文布局：仓库根一份 `GLOSSARY.md`，ADRs 位于 `docs/adr/`。为领域概念命名前先读词汇表，避免自造同义词。见 `docs/agents/domain.md`。
+## Build on Coze Drive mounts
+
+The cloud-drive mount corrupts Cargo artifacts (E0786 on proc-macro .so files). Always build with a local-disk target directory:
+
+```bash
+export CARGO_TARGET_DIR=/root/.cache/aider-rs-target
+```
