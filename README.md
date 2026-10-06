@@ -28,13 +28,21 @@ Claude Code  --(MCP stdio: aider_task / aider_undo / aider_status)-->  aider-rs
 
 ## Install
 
+This repo is a Claude Code plugin **marketplace** (self-hosted: the plugin
+lives in `plugin/`). For most users, install it as a plugin with two commands:
+
+```bash
+claude plugin marketplace add 9018447/aider-rs
+claude plugin install aider-rs
+```
+
+To build from source (developers), clone the repo and run:
+
 ```bash
 ./plugin/install.sh   # builds (local-disk target) and stages plugin/bin/aider-rs
 ```
 
-Then add the plugin to Claude Code — either via a plugin marketplace that
-points at the `plugin/` directory, or by referencing the server in your
-`.mcp.json`:
+Or reference the server directly in your `.mcp.json`:
 
 ```json
 {
