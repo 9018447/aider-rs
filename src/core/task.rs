@@ -205,7 +205,7 @@ fn run_llm_loop(
 
     for attempt in 0..max_attempts {
         let req = ChatRequest {
-            system: prompts::SYSTEM_PROMPT.to_string(),
+            system: prompts::system_prompt(),
             messages: history.clone(),
         };
         let resp = match client.complete(&req) {

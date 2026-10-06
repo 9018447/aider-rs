@@ -68,25 +68,29 @@ impl FileConfig {
             max_edit_retries,
             task_timeout_secs,
         } = self;
-        if cfg.provider.is_none() {
-            cfg.provider = provider.as_deref().and_then(parse_provider);
+        // Files are merged home → repo, so a later (higher-precedence) file
+        // overwrites whatever an earlier file or the defaults provided.
+        if let Some(p) = provider {
+            if let Some(parsed) = parse_provider(&p) {
+                cfg.provider = Some(parsed);
+            }
         }
-        if cfg.model.is_none() {
+        if model.is_some() {
             cfg.model = model;
         }
-        if cfg.api_key.is_none() {
+        if api_key.is_some() {
             cfg.api_key = api_key;
         }
-        if cfg.base_url.is_none() {
+        if base_url.is_some() {
             cfg.base_url = base_url;
         }
-        if cfg.timeout_secs.is_none() {
+        if timeout_secs.is_some() {
             cfg.timeout_secs = timeout_secs;
         }
-        if cfg.max_edit_retries.is_none() {
+        if max_edit_retries.is_some() {
             cfg.max_edit_retries = max_edit_retries;
         }
-        if cfg.task_timeout_secs.is_none() {
+        if task_timeout_secs.is_some() {
             cfg.task_timeout_secs = task_timeout_secs;
         }
     }
@@ -177,34 +181,28 @@ fn load_dotenv(path: Option<&std::path::Path>) -> Result<std::collections::HashM
 }
 
 fn apply_env(cfg: &mut Config, get: &impl Fn(&str) -> Option<String>) {
-    if cfg.provider.is_none() {
-        if let Some(p) = get("AIDER_RS_PROVIDER").as_deref().and_then(parse_provider) {
-            cfg.provider = Some(p);
-        }
+    // Environment is the highest-precedence layer: a present variable
+    // overrides whatever the config files provided.
+    if let Some(p) = get("AIDER_RS_PROVIDER").as_deref().and_then(parse_provider) {
+        cfg.provider = Some(p);
     }
-    if cfg.model.is_none() {
-        cfg.model = get("AIDER_RS_MODEL");
+    if let Some(m) = get("AIDER_RS_MODEL") {
+        cfg.model = Some(m);
     }
-    if cfg.api_key.is_none() {
-        cfg.api_key = get("ANTHROPIC_API_KEY").or_else(|| get("OPENAI_API_KEY"));
+    if let Some(k) = get("ANTHROPIC_API_KEY").or_else(|| get("OPENAI_API_KEY")) {
+        cfg.api_key = Some(k);
     }
-    if cfg.base_url.is_none() {
-        cfg.base_url = get("OPENAI_API_BASE").or_else(|| get("ANTHROPIC_BASE_URL"));
+    if let Some(b) = get("OPENAI_API_BASE").or_else(|| get("ANTHROPIC_BASE_URL")) {
+        cfg.base_url = Some(b);
     }
-    if cfg.timeout_secs.is_none() {
-        if let Some(t) = get("AIDER_RS_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
-            cfg.timeout_secs = Some(t);
-        }
+    if let Some(t) = get("AIDER_RS_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
+        cfg.timeout_secs = Some(t);
     }
-    if cfg.max_edit_retries.is_none() {
-        if let Some(r) = get("AIDER_RS_MAX_EDIT_RETRIES").and_then(|v| v.parse().ok()) {
-            cfg.max_edit_retries = Some(r);
-        }
+    if let Some(r) = get("AIDER_RS_MAX_EDIT_RETRIES").and_then(|v| v.parse().ok()) {
+        cfg.max_edit_retries = Some(r);
     }
-    if cfg.task_timeout_secs.is_none() {
-        if let Some(t) = get("AIDER_RS_TASK_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
-            cfg.task_timeout_secs = Some(t);
-        }
+    if let Some(t) = get("AIDER_RS_TASK_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
+        cfg.task_timeout_secs = Some(t);
     }
 }
 
@@ -230,19 +228,24 @@ mod tests {
     }
 
     #[test]
-    fn file_config_merges_without_overwriting() {
-        let mut cfg = Config {
-            model: Some("from-env".into()),
-            ..Default::default()
-        };
-        let f: FileConfig = serde_json::from_str(
-            r#"{"model": "from-file", "provider": "anthropic", "timeout_secs": 30}"#,
+    fn config_precedence_higher_layers_win() {
+        // Mirrors load(): defaults → home file → repo file → env.
+        let mut cfg = Config::default();
+        let home: FileConfig =
+            serde_json::from_str(r#"{"model": "from-home", "timeout_secs": 10}"#).unwrap();
+        home.merge_into(&mut cfg);
+        let repo: FileConfig = serde_json::from_str(
+            r#"{"model": "from-repo", "provider": "anthropic", "timeout_secs": 30}"#,
         )
         .unwrap();
-        f.merge_into(&mut cfg);
-        assert_eq!(cfg.model.as_deref(), Some("from-env"), "already-set fields win");
+        repo.merge_into(&mut cfg);
+        assert_eq!(cfg.model.as_deref(), Some("from-repo"), "repo file beats home file");
         assert_eq!(cfg.provider, Some(Provider::Anthropic));
-        assert_eq!(cfg.timeout_secs, Some(30));
+        assert_eq!(cfg.timeout_secs, Some(30), "repo value replaces home value");
+        let get = |k: &str| if k == "AIDER_RS_MODEL" { Some("from-env".into()) } else { None };
+        apply_env(&mut cfg, &get);
+        assert_eq!(cfg.model.as_deref(), Some("from-env"), "env beats files");
+        assert_eq!(cfg.timeout_secs, Some(30), "env absent keeps file value");
     }
 
     #[test]

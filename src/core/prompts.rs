@@ -3,6 +3,8 @@
 //! are never executed (they are reported back instead), and new files may be
 //! created freely (there is no chat-add workflow to ask about).
 
+use std::path::Path;
+
 pub const SYSTEM_PROMPT: &str = r#"Act as an expert software developer.
 Always use best practices when coding.
 Respect and use existing conventions, libraries, etc that are already present in the code base.
@@ -63,6 +65,61 @@ from flask import Flask
 
 10. Do NOT run shell commands. Reply with edits only.
 "#;
+
+/// The effective system prompt: the built-in SEARCH/REPLACE prompt with a
+/// non-empty `~/.config/aider-rs/AGENTS.md` appended as user-customizable
+/// additional instructions.
+pub fn system_prompt() -> String {
+    let mut prompt = SYSTEM_PROMPT.to_string();
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("aider-rs")
+            .join("AGENTS.md");
+        if let Some(custom) = system_prompt_from(&p) {
+            prompt.push_str("\n\n# Additional instructions\n\n");
+            prompt.push_str(&custom);
+        }
+    }
+    prompt
+}
+
+fn system_prompt_from(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_agents_md_is_appended() {
+        let dir = std::env::temp_dir().join(format!("aider-rs-prompts-{}-a", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("AGENTS.md");
+        std::fs::write(&p, "  \ncustom prompt for test\n").unwrap();
+        let prompt = system_prompt_from(&p).unwrap();
+        assert_eq!(prompt, "custom prompt for test");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_or_empty_file_falls_back_to_default() {
+        assert_eq!(system_prompt_from(Path::new("/nonexistent/AGENTS.md")), None);
+        let dir = std::env::temp_dir().join(format!("aider-rs-prompts-{}-b", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("AGENTS.md");
+        std::fs::write(&p, "   \n").unwrap();
+        assert_eq!(system_prompt_from(&p), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
 
 /// Build the user turn for a task, including the requested context files.
 pub fn task_user_message(task: &str, files: &[(String, String)]) -> String {

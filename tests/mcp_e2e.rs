@@ -90,6 +90,9 @@ impl McpClient {
     fn start_in(dir: &std::path::Path, base_url: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_aider-rs"))
             .current_dir(dir)
+            // Isolate from the developer's real ~/.config/aider-rs so user
+            // config (provider, keys) can never leak into the mock tests.
+            .env("HOME", std::env::temp_dir().join("aider-rs-e2e-home"))
             .env("OPENAI_API_KEY", "test-key")
             .env("OPENAI_API_BASE", base_url)
             .env("AIDER_RS_MODEL", "mock-model")
@@ -514,6 +517,7 @@ fn anthropic_native_provider_end_to_end() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_aider-rs"))
         .current_dir(&repo)
+        .env("HOME", std::env::temp_dir().join("aider-rs-e2e-home"))
         .env("ANTHROPIC_API_KEY", "test-key")
         .env("ANTHROPIC_BASE_URL", format!("http://{addr}"))
         .env("AIDER_RS_PROVIDER", "anthropic")
@@ -555,6 +559,7 @@ fn config_file_precedence_model_visible_in_status() {
     // No AIDER_RS_MODEL env: the repo config file must win.
     let mut child = Command::new(env!("CARGO_BIN_EXE_aider-rs"))
         .current_dir(&repo)
+        .env("HOME", std::env::temp_dir().join("aider-rs-e2e-home"))
         .env("OPENAI_API_KEY", "k")
         .env("OPENAI_API_BASE", &base_url)
         .env_remove("AIDER_RS_MODEL")

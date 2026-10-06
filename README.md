@@ -1,5 +1,6 @@
 # aider-rs
 
+
 An extremely lightweight Rust port of [aider](https://aider.chat), packaged as
 a **Claude Code plugin** (MCP server).
 
@@ -64,6 +65,10 @@ Configuration resolves in this order (highest first):
 | timeout_secs | `AIDER_RS_TIMEOUT_SECS` | per-request LLM timeout (default 120) |
 | task_timeout_secs | `AIDER_RS_TASK_TIMEOUT_SECS` | wall-clock budget per aider_task, including retry rounds (default 600); on timeout nothing is written |
 | max_edit_retries | `AIDER_RS_MAX_EDIT_RETRIES` | retry rounds when SEARCH blocks fail to match (default 1) |
+
+System prompt: a non-empty `~/.config/aider-rs/AGENTS.md` is appended to the
+built-in SEARCH/REPLACE prompt as additional instructions for every task;
+keep the file empty (or absent) to use the default alone.
 
 JSON keys in the config files are the left column, e.g.
 `{"provider": "openai", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"}`.
