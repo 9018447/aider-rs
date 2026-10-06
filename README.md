@@ -28,18 +28,26 @@ Claude Code  --(MCP stdio: aider_task / aider_undo / aider_status)-->  aider-rs
 
 ## Install
 
-This repo is a Claude Code plugin **marketplace** (self-hosted: the plugin
-lives in `plugin/`). For most users, install it as a plugin with two commands:
+This repo is a Claude Code plugin **marketplace** *and* the plugin itself
+(the repo root is the plugin root — it carries the manifest, dispatch skill,
+and the buildable Rust crate). For most users, install it as a plugin with two
+commands:
 
 ```bash
 claude plugin marketplace add 9018447/aider-rs
 claude plugin install aider-rs
 ```
 
-To build from source (developers), clone the repo and run:
+The plugin's MCP server is launched by `bin/aider-rs` — a wrapper script that
+rebuilds the release binary on first run (source ships with the plugin) and
+then execs it. No pre-built binary is committed; the installer needs a `cargo`
+toolchain for that first build.
+
+To run it directly (developers), build the binary then point an MCP server at
+the wrapper script, or just run the wrapper:
 
 ```bash
-./plugin/install.sh   # builds (local-disk target) and stages plugin/bin/aider-rs
+bin/aider-rs   # builds ${CARGO_TARGET_DIR:-$HOME/.cache/aider-rs-target}/release/aider-rs if missing, then execs it
 ```
 
 Or reference the server directly in your `.mcp.json`:
@@ -47,7 +55,7 @@ Or reference the server directly in your `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "aider-rs": { "command": "/absolute/path/to/aider-rs/plugin/bin/aider-rs" }
+    "aider-rs": { "command": "/absolute/path/to/aider-rs/bin/aider-rs" }
   }
 }
 ```
@@ -111,7 +119,7 @@ Acceptance targets (ticket 06): binary < 15MB, cold start < 200ms,
 resident memory < 50MB. Reproduce with:
 
 ```bash
-./plugin/install.sh
+cargo build --release
 python3 scripts/bench.py
 ```
 

@@ -11,10 +11,15 @@
       "name": "aider-rs",
       "version": "0.1.0",
       "description": "Extremely lightweight Rust port of aider: a session-resident MCP coding agent for Claude Code. Claude Code orchestrates; aider-rs codes with its own LLM and auto-commits.",
-      "source": "./plugin",
+      "source": "./",
       "category": "productivity",
       "homepage": "https://github.com/9018447/aider-rs",
-      "keywords": ["mcp", "coding-agent", "aider", "pair-programming"]
+      "keywords": [
+        "mcp",
+        "coding-agent",
+        "aider",
+        "pair-programming"
+      ]
     }
   ]
 }

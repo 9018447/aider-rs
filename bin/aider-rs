@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Rebuild the release binary on demand, then exec it.
+# MCP server launcher: Claude Code invokes this via ${CLAUDE_PLUGIN_ROOT}/bin/aider-rs.
+# The build target defaults to a local-disk directory because network/CLOUD
+# mounted filesystems corrupt Cargo artifacts; override with CARGO_TARGET_DIR.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET="${CARGO_TARGET_DIR:-$HOME/.cache/aider-rs-target}"
+BIN="$TARGET/release/aider-rs"
+if [ ! -x "$BIN" ]; then
+  CARGO_TARGET_DIR="$TARGET" cargo build --release --manifest-path "$ROOT/Cargo.toml"
+fi
+exec "$BIN"
